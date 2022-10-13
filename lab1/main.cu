@@ -64,10 +64,6 @@ int main () {
 
 	CSC(cudaMemcpy(c, dev_c, sizeof(double) * n, cudaMemcpyDeviceToHost));
 
-	// for (long long i = 0; i < n; ++i) {
-	// 	printf("%.10e ", c[i]);
-	// }
-
 	cudaFree(dev_a);
 	cudaFree(dev_b);
 	cudaFree(dev_c);

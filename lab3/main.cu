@@ -17,18 +17,18 @@ __global__ void kernel(uchar4* data, int nc, int w, int h) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
 	while (idx < w*h) {
-        char predicion;
+        char prediction;
         float best_distance = -INFINITY;
         for (char i = 0; i < nc; ++i){
             float current_distance = -(data[idx].x-dev_avg[i][0])*(data[idx].x-dev_avg[i][0])
                                      -(data[idx].y-dev_avg[i][1])*(data[idx].y-dev_avg[i][1])
                                      -(data[idx].z-dev_avg[i][2])*(data[idx].z-dev_avg[i][2]);
             if (current_distance > best_distance){
-                predicion = i;
+                prediction = i;
                 best_distance = current_distance;
             }
         }
-        data[idx].w = predicion;
+        data[idx].w = prediction;
 		idx += gridDim.x * blockDim.x;
 	}
 }
@@ -75,8 +75,21 @@ int main()
     CSC(cudaMemcpy(dev_data, data, sizeof(uchar4)*w*h, cudaMemcpyHostToDevice));
     CSC(cudaMemcpyToSymbol(dev_avg, &avg, 32*3*sizeof(float)));
 
-	kernel <<<256, 256>>> (dev_data, nc, w, h);
+    cudaEvent_t start, stop;
+	CSC(cudaEventCreate(&start));
+	CSC(cudaEventCreate(&stop));
+	CSC(cudaEventRecord(start));
+
+	kernel <<<1024, 1024>>> (dev_data, nc, w, h);
 	CSC(cudaGetLastError());
+
+    CSC(cudaEventRecord(stop));
+	CSC(cudaEventSynchronize(stop));
+	float time;
+	CSC(cudaEventElapsedTime(&time, start, stop));
+	CSC(cudaEventDestroy(start));
+	CSC(cudaEventDestroy(stop));
+	printf("time = %f ms \n", time);
 
 	CSC(cudaMemcpy(data, dev_data, sizeof(uchar4)*w*h, cudaMemcpyDeviceToHost));
 	CSC(cudaFree(dev_data));

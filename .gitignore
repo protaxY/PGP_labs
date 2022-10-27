@@ -4,3 +4,6 @@
 *.out
 *.data
 *.ans
+lab4/thrust.cu
+lab4/prof.cu
+lab4/lab4_viktor.cu

@@ -14,7 +14,7 @@ do {																										\
 
 struct comparator {												
 	__host__ __device__ bool operator()(double a, double b) {
-		return fabs(a) < fabs(b);
+		return abs(a) < abs(b);
 	}
 };
 
@@ -28,13 +28,21 @@ __global__ void swap_kernel(double *sub_matrix, int n, int m, int y, int x, int 
     }
 }
 
+__global__ void preparation_kernel(double* sub_matrix, int n, int m, int x, int y){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    while (x+1+idx < n){
+        sub_matrix[y*n+(x+1+idx)] /= sub_matrix[y*n+x];
+        idx += gridDim.x * blockDim.x;
+    }
+}
+
 __global__ void kernel(double* sub_matrix, int n, int m, int x, int y) {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     int idy = blockDim.y * blockIdx.y + threadIdx.y;
     while (y+1+idy < m){
         idx = blockDim.x * blockIdx.x + threadIdx.x;
         while (x+1+idx < n){
-            sub_matrix[(idy+y+1)*n+(idx+x+1)] -= sub_matrix[(idy+y+1)*n+x] * sub_matrix[y*n+(idx+x+1)]/sub_matrix[y*n+x];
+            sub_matrix[(y+1+idy)*n+(x+1+idx)] -= sub_matrix[(y+1+idy)*n+x]*sub_matrix[y*n+(x+1+idx)];
             idx += blockDim.x * gridDim.x;
         }
         idy += blockDim.y * gridDim.y;
@@ -55,27 +63,50 @@ int main() {
 	CSC(cudaMalloc(&dev_matrix, sizeof(double)*n*m));
 	CSC(cudaMemcpy(dev_matrix, matrix, sizeof(double)*n*m, cudaMemcpyHostToDevice));
 
+    int rank = m;
+    
+
+    cudaEvent_t start, stop;
+	CSC(cudaEventCreate(&start));
+	CSC(cudaEventCreate(&stop));
+	CSC(cudaEventRecord(start));
+
+
     int j = 0;
-    for (int i = 0; i < m; ++i){
+    for (int i = 0; i < m and j <= n; ++i){
+        if (j == n){
+            --rank;
+            continue;
+        }
         thrust::device_ptr<double> p_matrix = thrust::device_pointer_cast(dev_matrix);
 	    thrust::device_ptr<double> p_max_element = thrust::max_element(p_matrix+i*n+j, p_matrix+i*n+n, comp);
-        if (fabs(*p_max_element) > 1e-7){
-            if (j == n-1) {
-                ++j;
-                break;
-            }
-            int max_row_index = (int)(p_max_element-(p_matrix+i*n));
-            if (j != max_row_index){
-                swap_kernel<<<32, 32>>> (dev_matrix, n, m, i, j, max_row_index);
-                CSC(cudaGetLastError());
-            }
-            kernel<<< dim3(32, 32), dim3(32, 32) >>> (dev_matrix, n, m, j, i);
+        double max_value = *p_max_element;
+        if (abs(max_value) < 1e-7){
+            --rank;
+            
+            continue;
+        }
+
+        int max_row_index = (int)(p_max_element-(p_matrix+i*n));
+        if (j != max_row_index){
+            swap_kernel<<< 32, 32 >>> (dev_matrix, n, m, i, j, max_row_index);
             CSC(cudaGetLastError());
-            ++j;
-        }   
+        }
+        preparation_kernel<<< 32, 32 >>> (dev_matrix, n, m, j, i);
+        kernel<<< dim3(32, 32), dim3(32, 32) >>> (dev_matrix, n, m, j, i);
+        CSC(cudaGetLastError());
+        ++j;
     }
 
-    printf("%d", j);
+    CSC(cudaEventRecord(stop));
+	CSC(cudaEventSynchronize(stop));
+	float time;
+	CSC(cudaEventElapsedTime(&time, start, stop));
+	CSC(cudaEventDestroy(start));
+	CSC(cudaEventDestroy(stop));
+	printf("time = %f ms \n", time);
+
+
 
     cudaFree(dev_matrix);
 	free(matrix);

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <algorithm>
 
 #define CSC(call)																							\
 do {																										\
@@ -13,9 +14,9 @@ do {																										\
 
 typedef unsigned int uint;
 
-const uint BLOCK_SIZE = 8;
-const uint LOG2_BLOCK_SIZE = 3;
-const uint GRID_SIZE = 4;
+const uint BLOCK_SIZE = 128;
+const uint LOG2_BLOCK_SIZE = 7;
+const uint GRID_SIZE = 32;
 
 __global__ void scan_blocks_kernel(uint* data, uint* sums, uint sums_size) {
     int blockId = blockIdx.x;
@@ -37,7 +38,6 @@ __global__ void scan_blocks_kernel(uint* data, uint* sums, uint sums_size) {
 
         if (threadIdx.x == 0) {
             sums[blockId] = temp[_index(BLOCK_SIZE - 1)];
-            // printf("%d\n", temp[_index(BLOCK_SIZE - 1)]);
             temp[_index(BLOCK_SIZE - 1)] = 0;
         }
 
@@ -69,6 +69,27 @@ __global__ void add_kernel(uint* data, uint* sums, uint sums_size) {
     }
 }
 
+__global__ void b_gen_kernel(uint* a, uint k, uint n, uint* b){
+    uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    while (idx < n){
+        b[idx] = (a[idx]>>k)&1;
+        idx += gridDim.x * blockDim.x;
+    }
+}
+
+__global__ void binary_digit_sort_kernel(uint* a, uint* b, uint* s, uint size, uint* res){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    while(idx < size){
+        if (b[idx] == 0)
+            res[idx-s[idx]] = a[idx];
+        else if (b[idx] == 1)
+            res[s[idx]+(size-s[size])] = a[idx];
+        
+        idx += gridDim.x * blockDim.x;
+    }
+}
+
 void scan(uint* dev_data, uint size) {
     if (size % BLOCK_SIZE != 0)
         size += BLOCK_SIZE - (size % BLOCK_SIZE);
@@ -85,25 +106,66 @@ void scan(uint* dev_data, uint size) {
     add_kernel << < GRID_SIZE, BLOCK_SIZE >> > (dev_data, dev_sums, size);
 }
 
-int main() {
-    uint n;
-    scanf("%u", &n);
-    uint* data = (uint*)malloc(n * sizeof(uint));
-    for (uint i = 0; i < n; ++i) {
-        scanf("%u", &data[i]);
+void sort(uint* dev_data, uint size){
+    uint* dev_prev_res = dev_data;
+
+    uint* dev_res;
+    CSC(cudaMalloc(&dev_res, (size*sizeof(uint))));
+
+    uint* dev_b;
+    uint* dev_s;
+    CSC(cudaMalloc(&dev_b, (size*sizeof(uint))));
+    CSC(cudaMalloc(&dev_s, ((size+1)*sizeof(uint))));
+    
+    for (int k = 0; k < 32; ++k){
+        b_gen_kernel<<< GRID_SIZE, BLOCK_SIZE >>> (dev_prev_res, k, size, dev_b);
+        CSC(cudaGetLastError());
+        CSC(cudaMemcpy(dev_s, dev_b, size*sizeof(uint), cudaMemcpyDeviceToDevice));
+
+        scan(dev_s, size+1);
+
+        binary_digit_sort_kernel<<< GRID_SIZE, BLOCK_SIZE >>> (dev_prev_res, dev_b, dev_s, size, dev_res);
+        CSC(cudaGetLastError());
+
+        // uint* data = (uint*)malloc((size)*sizeof(uint));
+        // CSC(cudaMemcpy(data, dev_res, (size) * sizeof(uint), cudaMemcpyDeviceToHost));
+        // for (int i = 0; i < size; ++i){
+        //     printf("%u ", data[i]);
+        // }
+        // printf("\n");
+
+        std::swap(dev_prev_res, dev_res);
     }
+}
+
+int main() {
+    freopen(NULL, "rb", stdin);
+    freopen(NULL, "wb", stdout);
+
+    uint n;
+    fread(&n, sizeof(uint), 1, stdin);
+    // printf("%u\n", n);
+
+    uint* data = (uint*)malloc(n * sizeof(uint));
+    fread(data, sizeof(uint), n, stdin);
+    // for (uint i = 0; i < n; ++i) {
+    //     printf("%u ", data[i]);
+    // }
+    // printf("\n");
+
     uint* dev_data;
-    CSC(cudaMalloc(&dev_data, (n+1) * sizeof(uint)));
+    CSC(cudaMalloc(&dev_data, n * sizeof(uint)));
     CSC(cudaMemcpy(dev_data, data, n * sizeof(uint), cudaMemcpyHostToDevice));
 
-    scan(dev_data, n+1);
-    CSC(cudaGetLastError());
+    sort(dev_data, n);
+    
+    CSC(cudaMemcpy(data, dev_data, (n) * sizeof(uint), cudaMemcpyDeviceToHost));
 
-    CSC(cudaMemcpy(data, dev_data, (n+1) * sizeof(uint), cudaMemcpyDeviceToHost));
+    fwrite(data, sizeof(uint), n, stdout)
 
-    for (int i = 0; i < n+1; ++i) {
-        printf("%u ", data[i]);
-    }
+    // for (int i = 0; i < n; ++i) {
+    //     printf("%u ", data[i]);
+    // }
 
     return 0;
 }

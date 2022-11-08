@@ -16,7 +16,7 @@ typedef unsigned int uint;
 
 const uint BLOCK_SIZE = 128;
 const uint LOG2_BLOCK_SIZE = 7;
-const uint GRID_SIZE = 32;
+const uint GRID_SIZE = 64;
 
 __global__ void scan_blocks_kernel(uint* data, uint* sums, uint sums_size) {
     int blockId = blockIdx.x;
@@ -40,6 +40,7 @@ __global__ void scan_blocks_kernel(uint* data, uint* sums, uint sums_size) {
             sums[blockId] = temp[_index(BLOCK_SIZE - 1)];
             temp[_index(BLOCK_SIZE - 1)] = 0;
         }
+        __syncthreads();
 
         stride = 1 << LOG2_BLOCK_SIZE-1;
         while (stride != 0) {
@@ -59,7 +60,7 @@ __global__ void scan_blocks_kernel(uint* data, uint* sums, uint sums_size) {
 }
 
 __global__ void add_kernel(uint* data, uint* sums, uint sums_size) {
-    uint blockId = blockIdx.x;
+    uint blockId = blockIdx.x+1;
     while (blockId < sums_size) {
         if (blockId != 0) {
             data[blockDim.x * blockId + threadIdx.x] += sums[blockId];
@@ -69,7 +70,7 @@ __global__ void add_kernel(uint* data, uint* sums, uint sums_size) {
     }
 }
 
-__global__ void b_gen_kernel(uint* a, uint k, uint n, uint* b){
+__global__ void b_gen_kernel(uint* a, uint k, uint n, char* b){
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
     while (idx < n){
         b[idx] = (a[idx]>>k)&1;
@@ -77,13 +78,22 @@ __global__ void b_gen_kernel(uint* a, uint k, uint n, uint* b){
     }
 }
 
-__global__ void binary_digit_sort_kernel(uint* a, uint* b, uint* s, uint size, uint* res){
+__global__ void s_gen_fernel(char* b, uint n, uint* s){
+    uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    while (idx < n){
+        s[idx] = b[idx];
+
+        idx += gridDim.x * blockDim.x;
+    }
+}
+
+__global__ void binary_digit_sort_kernel(uint* a, char* b, uint* s, uint size, uint* res){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     while(idx < size){
         if (b[idx] == 0)
             res[idx-s[idx]] = a[idx];
-        else if (b[idx] == 1)
+        else 
             res[s[idx]+(size-s[size])] = a[idx];
         
         idx += gridDim.x * blockDim.x;
@@ -99,28 +109,35 @@ void scan(uint* dev_data, uint size) {
     uint* dev_sums;
     CSC(cudaMalloc(&dev_sums, (sums_size * sizeof(uint))));
     scan_blocks_kernel << < GRID_SIZE, BLOCK_SIZE, _index(BLOCK_SIZE) * sizeof(uint) >> > (dev_data, dev_sums, sums_size);
+    CSC(cudaGetLastError());
 
     if (size <= BLOCK_SIZE)
         return;
     scan(dev_sums, sums_size);
-    add_kernel << < GRID_SIZE, BLOCK_SIZE >> > (dev_data, dev_sums, size);
+
+    add_kernel << < GRID_SIZE, BLOCK_SIZE >> > (dev_data, dev_sums, sums_size);
+    CSC(cudaGetLastError());
+
+    cudaFree(dev_sums);
 }
 
-void sort(uint* dev_data, uint size){
+void sort(uint* &dev_data, uint size){
     uint* dev_prev_res = dev_data;
 
     uint* dev_res;
     CSC(cudaMalloc(&dev_res, (size*sizeof(uint))));
 
-    uint* dev_b;
+    char* dev_b;
     uint* dev_s;
-    CSC(cudaMalloc(&dev_b, (size*sizeof(uint))));
+    CSC(cudaMalloc(&dev_b, (size*sizeof(char))));
     CSC(cudaMalloc(&dev_s, ((size+1)*sizeof(uint))));
     
     for (int k = 0; k < 32; ++k){
         b_gen_kernel<<< GRID_SIZE, BLOCK_SIZE >>> (dev_prev_res, k, size, dev_b);
         CSC(cudaGetLastError());
-        CSC(cudaMemcpy(dev_s, dev_b, size*sizeof(uint), cudaMemcpyDeviceToDevice));
+
+        s_gen_fernel<<< GRID_SIZE, BLOCK_SIZE >>> (dev_b, size, dev_s);
+        // CSC(cudaMemcpy(dev_s, dev_b, size*sizeof(uint), cudaMemcpyDeviceToDevice));
 
         scan(dev_s, size+1);
 
@@ -136,6 +153,10 @@ void sort(uint* dev_data, uint size){
 
         std::swap(dev_prev_res, dev_res);
     }
+
+    cudaFree(dev_b);
+    cudaFree(dev_s);
+    cudaFree(dev_res);
 }
 
 int main() {
@@ -144,14 +165,9 @@ int main() {
 
     uint n;
     fread(&n, sizeof(uint), 1, stdin);
-    // printf("%u\n", n);
 
     uint* data = (uint*)malloc(n * sizeof(uint));
     fread(data, sizeof(uint), n, stdin);
-    // for (uint i = 0; i < n; ++i) {
-    //     printf("%u ", data[i]);
-    // }
-    // printf("\n");
 
     uint* dev_data;
     CSC(cudaMalloc(&dev_data, n * sizeof(uint)));
@@ -161,11 +177,35 @@ int main() {
     
     CSC(cudaMemcpy(data, dev_data, (n) * sizeof(uint), cudaMemcpyDeviceToHost));
 
-    fwrite(data, sizeof(uint), n, stdout)
+    fwrite(data, sizeof(uint), n, stdout);
 
-    // for (int i = 0; i < n; ++i) {
-    //     printf("%u ", data[i]);
-    // }
+    cudaFree(dev_data);
+    free(data);
 
     return 0;
 }
+
+// int main() {
+//     uint n;
+//     scanf("%u", &n);
+//     uint* data = (uint*)malloc(n * sizeof(uint));
+//     for (uint i = 0; i < n; ++i) {
+//         scanf("%u", &data[i]);
+//     }
+//     uint* dev_data;
+//     CSC(cudaMalloc(&dev_data, (n) * sizeof(uint)));
+//     CSC(cudaMemcpy(dev_data, data, n * sizeof(uint), cudaMemcpyHostToDevice));
+
+//     sort(dev_data, n);
+
+//     CSC(cudaMemcpy(data, dev_data, (n) * sizeof(uint), cudaMemcpyDeviceToHost));
+
+//     // for (int i = 0; i < n; ++i) {
+//     //     printf("%u ", data[i]);
+//     // }
+
+//     cudaFree(dev_data);
+//     free(data);
+
+//     return 0;
+// }

@@ -7,16 +7,28 @@
 #include <cuda_gl_interop.h>
 #include <random>
 
+#define sqr3(x) ((x)*(x)*(x))
+#define sqr(x) ((x)*(x))
+
+#define CSC(call)																							\
+do {																										\
+	cudaError_t status = call;																				\
+	if (status != cudaSuccess) {																			\
+		fprintf(stderr, "ERROR is %s:%d. Message: %s\n", __FILE__, __LINE__, cudaGetErrorString(status));	\
+		exit(0);																							\
+	}																										\
+} while(0)	
+
 // resolution
 	int w = 1024, h = 648;
+// bounding box parametrs
+	const float offset = 15.0;
 // camera parametrs 
-	float cam_x = -1.5, cam_y = -1.5, cam_z = 1.0;
+	float cam_x = -1.5*offset, cam_y = 0, cam_z = 1.8*offset;
 	float cam_dx = 0.0, cam_dy = 0.0, cam_dz = 0.0;
 	float cam_yaw = 0.0, cam_pitch = 0.0;
 	float cam_dyaw = 0.0, cam_dpitch = 0.0;
-	float cam_speed = 0.05;
-// bounding box parametrs
-	const float offset = 15.0;
+	float cam_speed = 0.1;
 // texture
 	GLuint textures[2];				// Массив из текстурных номеров
 	GLuint* particle_texture = &textures[0];
@@ -30,21 +42,23 @@
 		float x;
 		float y;
 		float z;
-		float dx = 0;
-		float dy = 0;
-		float dz = 0;
-		float q = 0.1;
+		float dx;
+		float dy;
+		float dz;
+		float q;
 	};
-	particle projectile{10000.0, 10000.0, 10000.0, 0.0, 0.0, 0.0, 2.0};
-	const float projectile_speed = 0.5;
-	particle cam_particle{cam_x, cam_y, cam_z, cam_dx, cam_dy, cam_dz, 1.0};
+	particle projectile{10000.0, 10000.0, 10000.0, 0.0, 0.0, 0.0, 1000.0};
+	const float projectile_speed = 200.0;
+	particle cam_particle{cam_x, cam_y, cam_z, cam_dx, cam_dy, cam_dz, 3.0};
 	particle* particles;
-	uint num_particles = 10;
+	particle* dev_particles;
+	uint num_particles = 200;
 // physics parametrs
 	const float e = 1e-3;
 	const float dt = 0.005;
-	const float W = 0.9999;
+	const float W = 0.99;
 	const float K = 50.0;
+	const float g = 15.0;
 
 void reshape(int w_new, int h_new) {
 	w = w_new;
@@ -75,6 +89,9 @@ void keys(unsigned char key, int x, int y) {	// Обработка кнопок
 			cam_dy += -cos(cam_yaw) * cam_speed;
 		break;
 		case 27:
+			cudaFree(dev_particles);
+			free(particles);
+
 			cudaGraphicsUnregisterResource(pbo_res);
 			glDeleteTextures(2, textures);
 			glDeleteBuffers(1, &pbo);
@@ -114,15 +131,19 @@ void mouse_click(int button, int state, int x, int y)
 }
 
 void particles_random_init(){
-	particles = (particle*)malloc(sizeof(particle)*num_particles);
-
 	std::random_device rd;
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(-offset+1, offset-1);
 	for (int i = 0; i < num_particles; i++) {
 		particles[i].x = dist(gen);
 		particles[i].y = dist(gen);
-		particles[i].z = dist(gen);
+		particles[i].z = abs(dist(gen))+1;
+
+		particles[i].dx = 0;
+		particles[i].dy = 0;
+		particles[i].dz = 0;
+
+		particles[i].q = 0.5;
 	}
 }
 
@@ -159,6 +180,103 @@ void draw_bbox(){
 	glEnd();
 }
 
+void draw_particles(){
+	glBindTexture(GL_TEXTURE_2D, *particle_texture);
+	for (uint i = 0; i < num_particles; ++i){
+		glPushMatrix();
+			glTranslatef(particles[i].x, particles[i].y, particles[i].z);	// Задаем координаты центра сферы
+			// glRotatef(angle, 0.0, 0.0, 1.0);
+			gluSphere(quadratic, 0.5f, 2*4, 4);
+		glPopMatrix();
+	}
+}
+
+void draw_projectile(){
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glPushMatrix();
+		glTranslatef(projectile.x, projectile.y, projectile.z);	// Задаем координаты центра сферы
+		// glRotatef(angle, 0.0, 0.0, 1.0);
+		gluSphere(quadratic, 1.0f, 2*4, 4);
+	glPopMatrix();
+}
+
+__global__ void particle_kernel(particle* particles, uint num_particles, particle cam_particle, particle projectile, float K, float W, float g, float offset, float dt, float e) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	while (idx < num_particles){
+		// замедление
+			particles[idx].dx *= W;
+			particles[idx].dy *= W;
+			particles[idx].dz *= W;
+
+		// Отталкивание от стен
+			particles[idx].dx += 2*sqr(particles[idx].q)*K*(particles[idx].x-offset)/(sqr3(fabs(particles[idx].x-offset))+e)*dt;
+			particles[idx].dx += 2*sqr(particles[idx].q)*K*(particles[idx].x+offset)/(sqr3(fabs(particles[idx].x+offset))+e)*dt;
+
+			particles[idx].dy += 2*sqr(particles[idx].q)*K*(particles[idx].y-offset)/(sqr3(fabs(particles[idx].y-offset))+e)*dt;
+			particles[idx].dy += 2*sqr(particles[idx].q)*K*(particles[idx].y+offset)/(sqr3(fabs(particles[idx].y+offset))+e)*dt;
+
+			particles[idx].dz += 2*particles[idx].q*particles[idx].q*K*(particles[idx].z-2*offset)/(sqr3(fabs(particles[idx].z-2*offset))+e)*dt;
+			particles[idx].dz += 2*particles[idx].q*particles[idx].q*K*(particles[idx].z)/(sqr3(fabs(particles[idx].z))+e)*dt;
+
+		// Отталкивание от камеры
+			float cam_r = sqrt(sqr(particles[idx].x-cam_particle.x)+sqr(particles[idx].y-cam_particle.y)+sqr(particles[idx].z-cam_particle.z));
+			particles[idx].dx += cam_particle.q*particles[idx].q*K*(particles[idx].x-cam_particle.x)/(sqr3(cam_r)+e)*dt;
+			particles[idx].dy += cam_particle.q*particles[idx].q*K*(particles[idx].y-cam_particle.y)/(sqr3(cam_r)+e)*dt;
+			particles[idx].dz += cam_particle.q*particles[idx].q*K*(particles[idx].z-cam_particle.z)/(sqr3(cam_r)+e)*dt;
+
+		// отталкивание от снаряда
+			float projectile_r = sqrt(sqr(particles[idx].x-projectile.x)+sqr(particles[idx].y-projectile.y)+sqr(particles[idx].z-projectile.z));
+			particles[idx].dx += projectile.q*particles[idx].q*K*(particles[idx].x-projectile.x)/(sqr3(projectile_r)+e)*dt;
+			particles[idx].dy += projectile.q*particles[idx].q*K*(particles[idx].y-projectile.y)/(sqr3(projectile_r)+e)*dt;
+			particles[idx].dz += projectile.q*particles[idx].q*K*(particles[idx].z-projectile.z)/(sqr3(projectile_r)+e)*dt;
+
+		// отталкивание от остальных частиц
+			for (uint i = 0; i < num_particles; ++i){
+				if (idx == i)
+					continue;
+				
+				float r = sqrt(sqr(particles[idx].x-particles[i].x)+sqr(particles[idx].y-particles[i].y)+sqr(particles[idx].z-particles[i].z));
+				particles[idx].dx += particles[i].q*particles[idx].q*K*(particles[idx].x-particles[i].x)/(sqr3(r)+e)*dt;
+				particles[idx].dy += particles[i].q*particles[idx].q*K*(particles[idx].y-particles[i].y)/(sqr3(r)+e)*dt;
+				particles[idx].dz += particles[i].q*particles[idx].q*K*(particles[idx].z-particles[i].z)/(sqr3(r)+e)*dt;
+			}
+
+		// гравитация
+			particles[idx].dz -= g*dt;
+
+		// шаг по времени
+			particles[idx].x += particles[idx].dx*dt;
+			particles[idx].y += particles[idx].dy*dt;
+			particles[idx].z += particles[idx].dz*dt;
+
+		// коллизия со стенами
+			if (particles[idx].x < -offset+e)
+				particles[idx].x = -offset+e;
+			if (particles[idx].x > offset-e)
+				particles[idx].x = offset-e;
+
+			if (particles[idx].y < -offset+e)
+				particles[idx].y = -offset+e;
+			if (particles[idx].y > offset-e)
+				particles[idx].y = offset-e;
+
+			if (particles[idx].z < e)
+				particles[idx].z = e;
+			if (particles[idx].z > 2*offset-e)
+				particles[idx].z = 2*offset-e;
+
+		idx += blockDim.x * gridDim.x;
+	}
+}
+
+void particles_step(){
+	CSC(cudaMemcpy(dev_particles, particles, sizeof(particle)*num_particles, cudaMemcpyHostToDevice));
+	particle_kernel<<<16, 32>>> (dev_particles, num_particles, cam_particle, projectile, K, W, g, offset, dt, e);
+	CSC(cudaGetLastError());
+	CSC(cudaMemcpy(particles, dev_particles, sizeof(particle)*num_particles, cudaMemcpyDeviceToHost));
+}
+
 void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -179,31 +297,40 @@ void display() {
 
 	draw_bbox();
 
-	// printf("update\n");
-	// printf("%f %f", cam_)
+	draw_projectile();
+	draw_particles();
+
 	glutSwapBuffers();
 }
 
 void update(){
-	float v = sqrt(cam_dx*cam_dx+cam_dy*cam_dy+cam_dz*cam_dz);
-	if (v > cam_speed) {		// Ограничение максимальной скорости
-		cam_dx *= cam_speed / v;
-		cam_dy *= cam_speed / v;
-		cam_dz *= cam_speed / v;
-	}
-	cam_x += cam_dx; cam_dx *= 0.99;
-	cam_y += cam_dy; cam_dy *= 0.99;
-	cam_z += cam_dz; cam_dz *= 0.99;
-	if (cam_z < 1.0) {			// Пол, ниже которого камера не может переместиться
-		cam_z = 1.0;
-		cam_dz = 0.0;
-	}
-	if (fabs(cam_dpitch) + fabs(cam_dyaw) > 0.0001) {	// Вращение камеры
-		cam_yaw += cam_dyaw;
-		cam_pitch += cam_dpitch;
-		cam_pitch = min(M_PI / 2.0 - 0.0001, max(-M_PI / 2.0 + 0.0001, cam_pitch));
-		cam_dyaw = cam_dpitch = 0.0;
-	}
+	// camera
+		float v = sqrt(cam_dx*cam_dx+cam_dy*cam_dy+cam_dz*cam_dz);
+		if (v > cam_speed) {		// Ограничение максимальной скорости
+			cam_dx *= cam_speed / v;
+			cam_dy *= cam_speed / v;
+			cam_dz *= cam_speed / v;
+		}
+		cam_x += cam_dx; cam_dx *= 0.99;
+		cam_y += cam_dy; cam_dy *= 0.99;
+		cam_z += cam_dz; cam_dz *= 0.99;
+		if (cam_z < 1.0) {			// Пол, ниже которого камера не может переместиться
+			cam_z = 1.0;
+			cam_dz = 0.0;
+		}
+		if (fabs(cam_dpitch) + fabs(cam_dyaw) > 0.0001) {	// Вращение камеры
+			cam_yaw += cam_dyaw;
+			cam_pitch += cam_dpitch;
+			cam_pitch = min(M_PI / 2.0 - 0.0001, max(-M_PI / 2.0 + 0.0001, cam_pitch));
+			cam_dyaw = cam_dpitch = 0.0;
+		}
+
+	// projectile
+		projectile.x += projectile.dx*dt;
+		projectile.y += projectile.dy*dt;
+		projectile.z += projectile.dz*dt;
+	// particles
+		particles_step();
 
 	glutPostRedisplay();
 }
@@ -268,6 +395,8 @@ int main(int argc, char **argv) {
 		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);			// Деактивируем буфер
 
 	// init scene
+		particles = (particle*)malloc(sizeof(particle)*num_particles);
+		CSC(cudaMalloc(&dev_particles, sizeof(particle)*num_particles));
 		particles_random_init();
 
 	glutMainLoop();

@@ -35,7 +35,7 @@ do {																										\
 	GLuint* floor_texture = &textures[1];
 	const uint floor_texture_size = 128;
 	GLuint pbo;						// Номер буфера
-	cudaGraphicsResource *pbo_res;
+	cudaGraphicsResource* pbo_res;
 // particles parametrs
 	GLUquadric* quadratic;
 	struct particle {
@@ -46,10 +46,12 @@ do {																										\
 		float dy;
 		float dz;
 		float q;
+		float angle;
+		float spin;
 	};
-	particle projectile{10000.0, 10000.0, 10000.0, 0.0, 0.0, 0.0, 1000.0};
+	particle projectile{10000.0, 10000.0, 10000.0, 0.0, 0.0, 0.0, 1000.0, 0};
 	const float projectile_speed = 200.0;
-	particle cam_particle{cam_x, cam_y, cam_z, cam_dx, cam_dy, cam_dz, 3.0};
+	particle cam_particle{cam_x, cam_y, cam_z, cam_dx, cam_dy, cam_dz, 10.0, 0};
 	particle* particles;
 	particle* dev_particles;
 	uint num_particles = 200;
@@ -144,6 +146,9 @@ void particles_random_init(){
 		particles[i].dz = 0;
 
 		particles[i].q = 0.5;
+
+		particles[i].angle = 0;
+		particles[i].spin = 100*dist(gen);
 	}
 }
 
@@ -185,7 +190,7 @@ void draw_particles(){
 	for (uint i = 0; i < num_particles; ++i){
 		glPushMatrix();
 			glTranslatef(particles[i].x, particles[i].y, particles[i].z);	// Задаем координаты центра сферы
-			// glRotatef(angle, 0.0, 0.0, 1.0);
+			glRotatef(particles[i].angle, 0.0, 0.0, 1.0);
 			gluSphere(quadratic, 0.5f, 2*4, 4);
 		glPopMatrix();
 	}
@@ -195,9 +200,31 @@ void draw_projectile(){
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glPushMatrix();
 		glTranslatef(projectile.x, projectile.y, projectile.z);	// Задаем координаты центра сферы
-		// glRotatef(angle, 0.0, 0.0, 1.0);
 		gluSphere(quadratic, 1.0f, 2*4, 4);
 	glPopMatrix();
+}
+
+void draw_floor(){
+	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);	// Делаем активным буфер с номером vbo
+	glBindTexture(GL_TEXTURE_2D, *floor_texture);	// Делаем активной вторую текстуру
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, (GLsizei)floor_texture_size, (GLsizei)floor_texture_size, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL); 
+	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);	// Деактивируем буфер
+
+	glBegin(GL_QUADS);			// Рисуем пол
+		glTexCoord2f(0.0, 0.0);
+		glVertex3f(-offset, -offset, 0.0);
+
+		glTexCoord2f(1.0, 0.0);
+		glVertex3f(offset, -offset, 0.0);
+
+		glTexCoord2f(1.0, 1.0);
+		glVertex3f(offset, offset, 0.0);
+
+		glTexCoord2f(0.0, 1.0);
+		glVertex3f(-offset, offset, 0.0);
+	glEnd();
+
+	glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 __global__ void particle_kernel(particle* particles, uint num_particles, particle cam_particle, particle projectile, float K, float W, float g, float offset, float dt, float e) {
@@ -249,6 +276,7 @@ __global__ void particle_kernel(particle* particles, uint num_particles, particl
 			particles[idx].x += particles[idx].dx*dt;
 			particles[idx].y += particles[idx].dy*dt;
 			particles[idx].z += particles[idx].dz*dt;
+			particles[idx].angle += particles[idx].spin*dt;
 
 		// коллизия со стенами
 			if (particles[idx].x < -offset+e)
@@ -270,11 +298,44 @@ __global__ void particle_kernel(particle* particles, uint num_particles, particl
 	}
 }
 
+__global__ void floor_kernel(uchar4* dev_floor_data, uint floor_texture_size, particle* particles, uint num_particles, particle projectile, float offset){
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+	float x, y;
+	for (uint i = idx; i < floor_texture_size; i += blockDim.x*gridDim.x){
+		for (uint j = idy; j < floor_texture_size; j += blockDim.y*gridDim.y){
+			x = (2.0*i/(floor_texture_size-1.0)-1.0)*offset;
+			y = (2.0*j/(floor_texture_size-1.0)-1.0)*offset;
+
+			float fg = 0.0;
+			for (uint k = 0; k < num_particles; ++k){
+				fg += 100.0*particles[k].q/(sqr(x-particles[k].x)+sqr(y-particles[k].y)+sqr(particles[k].z));
+			}
+			fg += 100.0*projectile.q/(sqr(x-projectile.x)+sqr(y-projectile.y)+sqr(projectile.z));
+
+			fg = min(max(0.0f, fg), 255.0f);
+			dev_floor_data[j*floor_texture_size+i] = make_uchar4(0, (uint)fg, (uint)fg, 255);
+		}
+	}
+}
+
 void particles_step(){
 	CSC(cudaMemcpy(dev_particles, particles, sizeof(particle)*num_particles, cudaMemcpyHostToDevice));
 	particle_kernel<<<16, 32>>> (dev_particles, num_particles, cam_particle, projectile, K, W, g, offset, dt, e);
 	CSC(cudaGetLastError());
 	CSC(cudaMemcpy(particles, dev_particles, sizeof(particle)*num_particles, cudaMemcpyDeviceToHost));
+}
+
+void floor_step(){
+	uchar4* dev_floor_data;
+	size_t size;
+	CSC(cudaGraphicsMapResources(1, &pbo_res, 0));		// Делаем буфер доступным для CUDA
+	CSC(cudaGraphicsResourceGetMappedPointer((void**) &dev_floor_data, &size, pbo_res));	// Получаем указатель на память буфера
+	floor_kernel<<<dim3(16, 16), dim3(32, 32)>>>(dev_floor_data, floor_texture_size, dev_particles, num_particles, projectile, offset);
+	CSC(cudaGetLastError());
+	CSC(cudaGraphicsUnmapResources(1, &pbo_res, 0));		// Возращаем буфер OpenGL'ю что бы он мог его использовать
+
 }
 
 void display() {
@@ -299,7 +360,8 @@ void display() {
 
 	draw_projectile();
 	draw_particles();
-
+	draw_floor();
+	
 	glutSwapBuffers();
 }
 
@@ -325,12 +387,19 @@ void update(){
 			cam_dyaw = cam_dpitch = 0.0;
 		}
 
+	// camera
+		cam_particle.x = cam_x;
+		cam_particle.y = cam_y;
+		cam_particle.z = cam_z;
 	// projectile
 		projectile.x += projectile.dx*dt;
 		projectile.y += projectile.dy*dt;
 		projectile.z += projectile.dz*dt;
 	// particles
 		particles_step();
+
+	// floor
+		floor_step();
 
 	glutPostRedisplay();
 }
@@ -339,7 +408,7 @@ int main(int argc, char **argv) {
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA);
 	glutInitWindowSize(w, h);
-	glutCreateWindow("OpenGL");
+	glutCreateWindow("Lab6");
 
 	glutIdleFunc(update);
 	glutDisplayFunc(display);
@@ -352,7 +421,7 @@ int main(int argc, char **argv) {
 
 	// load particle texture
 		int texture_w, texture_h;
-		FILE *fp = fopen("in.data", "rb");
+		FILE *fp = fopen("mars.data", "rb");
 		fread(&texture_w, sizeof(int), 1, fp);
 		fread(&texture_h, sizeof(int), 1, fp);
 		uchar4* data = (uchar4*)malloc(sizeof(uchar4)*texture_w*texture_h);
@@ -369,6 +438,7 @@ int main(int argc, char **argv) {
 		// если больше
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); //GL_LINEAR);
 
+	// setup floor texture
 		glBindTexture(GL_TEXTURE_2D, *floor_texture);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);	// Интерполяция 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);	// Интерполяция	
@@ -390,7 +460,7 @@ int main(int argc, char **argv) {
 	// floor pixel buffer object init and setup
 		glGenBuffers(1, &pbo);								// Получаем номер буфера
 		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);			// Делаем его активным
-		glBufferData(GL_PIXEL_UNPACK_BUFFER, floor_texture_size*floor_texture_size*sizeof(uchar4), NULL, GL_DYNAMIC_DRAW);	// Задаем размер буфера
+		glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof(uchar4)*floor_texture_size*floor_texture_size, NULL, GL_DYNAMIC_DRAW);	// Задаем размер буфера
 		cudaGraphicsGLRegisterBuffer(&pbo_res, pbo, cudaGraphicsMapFlagsWriteDiscard);				// Регистрируем буфер для использования его памяти в CUDA
 		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);			// Деактивируем буфер
 

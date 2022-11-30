@@ -3,6 +3,7 @@
 *.json
 *.out
 *.data
+!lab6/mars.data
 *.ans
 *.in
 lab4/thrust.cu

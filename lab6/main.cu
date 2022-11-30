@@ -136,7 +136,7 @@ void particles_random_init(){
 	std::random_device rd;
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(-offset+1, offset-1);
-	for (int i = 0; i < num_particles; i++) {
+	for (uint i = 0; i < num_particles; i++) {
 		particles[i].x = dist(gen);
 		particles[i].y = dist(gen);
 		particles[i].z = abs(dist(gen))+1;

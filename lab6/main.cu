@@ -322,7 +322,22 @@ __global__ void floor_kernel(uchar4* dev_floor_data, uint floor_texture_size, pa
 
 void particles_step(){
 	CSC(cudaMemcpy(dev_particles, particles, sizeof(particle)*num_particles, cudaMemcpyHostToDevice));
-	particle_kernel<<<16, 32>>> (dev_particles, num_particles, cam_particle, projectile, K, W, g, offset, dt, e);
+
+	cudaEvent_t start, stop;
+	CSC(cudaEventCreate(&start));
+	CSC(cudaEventCreate(&stop));
+	CSC(cudaEventRecord(start));
+
+	particle_kernel<<<512, 32>>> (dev_particles, num_particles, cam_particle, projectile, K, W, g, offset, dt, e);
+
+	CSC(cudaEventRecord(stop));
+	CSC(cudaEventSynchronize(stop));
+	float time;
+	CSC(cudaEventElapsedTime(&time, start, stop));
+	CSC(cudaEventDestroy(start));
+	CSC(cudaEventDestroy(stop));
+	printf("time = %f ms \n", time);
+
 	CSC(cudaGetLastError());
 	CSC(cudaMemcpy(particles, dev_particles, sizeof(particle)*num_particles, cudaMemcpyDeviceToHost));
 }
@@ -335,7 +350,6 @@ void floor_step(){
 	floor_kernel<<<dim3(16, 16), dim3(32, 32)>>>(dev_floor_data, floor_texture_size, dev_particles, num_particles, projectile, offset);
 	CSC(cudaGetLastError());
 	CSC(cudaGraphicsUnmapResources(1, &pbo_res, 0));		// Возращаем буфер OpenGL'ю что бы он мог его использовать
-
 }
 
 void display() {

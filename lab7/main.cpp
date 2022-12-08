@@ -7,11 +7,10 @@
 #include "mpi.h"
 
 #define _i(x, y, z) ((z+1)*((ny+2)*(nx+2))+(y+1)*(nx+2)+(x+1))
-#define _ib(x, y, z) (z*(ynb*xnb)+y*xnb+x)
+#define _ib(x, y, z) ((z)*(ynb*xnb)+(y)*xnb+(x))
 
-// #define _ix(id) ()
-// #define _iy(id) ()
-// #define _iz(id) ()
+// #define _i(x, y, z) ((x+1)*((ny+2)*(nz+2))+(y+1)*(nz+2)+(z+1))
+// #define _ib(x, y, z) ((x)*(ynb*znb)+(y)*znb+(z))
 
 // параметры отдельноо процесса
 int id;
@@ -54,12 +53,14 @@ void broadcast_params(){
 	MPI_Bcast(&bc_right, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 	MPI_Bcast(&bc_front, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 	MPI_Bcast(&bc_back, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+	MPI_Bcast(&u0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 }
 
 int main(int argc, char *argv[]) {
 	MPI_Init(&argc, &argv);
-    
     MPI_Comm_rank(MPI_COMM_WORLD, &id);
+    
     if (id == 0){
         std::cin >> xnb >> ynb >> znb;
         std::cin >> nx >> ny >> nz;
@@ -69,10 +70,11 @@ int main(int argc, char *argv[]) {
         std::cin >> bc_down >> bc_up >> bc_left >> bc_right >> bc_front >> bc_back;
         std::cin >> u0;
     }
+    MPI_Barrier(MPI_COMM_WORLD);
     broadcast_params();
 
-    xb = id%xnb;
-    yb = (id/xnb)%ynb;
+    xb = id%(xnb*ynb)%xnb;
+    yb = id%(xnb*ynb)/xnb;
     zb = id/(xnb*ynb);
 
     double hx, hy, hz;
@@ -83,21 +85,14 @@ int main(int argc, char *argv[]) {
     next_data = (double*)malloc((nx+2)*(ny+2)*(nz+2)*sizeof(double));
     data = (double*)malloc((nx+2)*(ny+2)*(nz+2)*sizeof(double));
     double* eps_buff = (double*)malloc(xnb*ynb*znb*sizeof(double));
-    double max_eps = std::numeric_limits<double>::infinity();
+    double max_eps = 10000000.0;
 
     // инициализация начального состояния блока
     for (int z = -1; z <= nz; ++z){   
         for (int y = -1; y <= ny; ++y){
             for (int x = -1; x <= nx; ++x){
                 data[_i(x, y, z)] = u0;
-            }
-        }
-    }
-
-    for (int z = -1; z <= nz; ++z){   
-        for (int y = -1; y <= ny; ++y){
-            for (int x = -1; x <= nx; ++x){
-                next_data[_i(x, y, z)] = u0;
+                // next_data[_i(x, y, z)] = u0;
             }
         }
     }
@@ -110,9 +105,9 @@ int main(int argc, char *argv[]) {
     double* recv_left_right_buff = (double*)malloc(nz*ny*sizeof(double));
     double* recv_front_back_buff = (double*)malloc(nz*nx*sizeof(double));
 
-    MPI_Barrier(MPI_COMM_WORLD);
     while(max_eps > eps){
-        // отправка (right. front, up)
+        MPI_Barrier(MPI_COMM_WORLD);
+        // отправка (right. back, up)
             // right
             if (xb < xnb-1){
                 for (int z = 0; z < nz; ++z){
@@ -122,11 +117,11 @@ int main(int argc, char *argv[]) {
                 }
                 MPI_Send(send_left_right_buff, nz*ny, MPI_DOUBLE, _ib(xb+1, yb, zb), id, MPI_COMM_WORLD);
             }
-            // front
+            // back
             if (yb < ynb-1){
                 for (int z = 0; z < nz; ++z){
                     for (int x = 0; x < nx; ++x){
-                        send_front_back_buff[z*nz+x] = data[_i(x, ny-1, z)];
+                        send_front_back_buff[z*nx+x] = data[_i(x, ny-1, z)];
                     }
                 }
                 MPI_Send(send_front_back_buff, nz*nx, MPI_DOUBLE, _ib(xb, yb+1, zb), id, MPI_COMM_WORLD);
@@ -135,14 +130,15 @@ int main(int argc, char *argv[]) {
             if (zb < znb-1){
                 for (int y = 0; y < ny; ++y){
                     for (int x = 0; x < nx; ++x){
-                        send_up_down_buff[y*ny+x] = data[_i(x, y, nz-1)];
+                        send_up_down_buff[y*nx+x] = data[_i(x, y, nz-1)];
                     }
                 }
                 MPI_Send(send_up_down_buff, ny*nx, MPI_DOUBLE, _ib(xb, yb, zb+1), id, MPI_COMM_WORLD);
             }
-        // прием (left, back, down)
+        // прием (left, front, down)
             // left
             if (xb > 0){
+                // std::cout << id << "left\n";
                 MPI_Recv(recv_left_right_buff, nz*ny, MPI_DOUBLE, _ib(xb-1, yb, zb), _ib(xb-1, yb, zb), MPI_COMM_WORLD, &status);
                 for (int z = 0; z < nz; ++z){
                     for (int y = 0; y < ny; ++y){
@@ -156,27 +152,29 @@ int main(int argc, char *argv[]) {
                     }
                 }
             } 
-            // back
+            // front
             if (yb > 0){
+                // std::cout << id << "front\n";
                 MPI_Recv(recv_front_back_buff, nz*nx, MPI_DOUBLE, _ib(xb, yb-1, zb), _ib(xb, yb-1, zb), MPI_COMM_WORLD, &status);
                 for (int z = 0; z < nz; ++z){
                     for (int x = 0; x < nx; ++x){
-                        data[_i(x, -1, z)] = recv_front_back_buff[z*nz+x];
+                        data[_i(x, -1, z)] = recv_front_back_buff[z*nx+x];
                     }
                 }
             } else {
                 for (int z = 0; z < nz; ++z){
                     for (int x = 0; x < nx; ++x){
-                        data[_i(x, -1, z)] = bc_back;
+                        data[_i(x, -1, z)] = bc_front;
                     }
                 }
             }
             // down
             if (zb > 0){
+                // std::cout << id << "down\n";
                 MPI_Recv(recv_up_down_buff, ny*nx, MPI_DOUBLE, _ib(xb, yb, zb-1), _ib(xb, yb, zb-1), MPI_COMM_WORLD, &status);
                 for (int y = 0; y < ny; ++y){
                     for (int x = 0; x < nx; ++x){
-                        data[_i(x, y, -1)] = recv_up_down_buff[y*ny+x];
+                        data[_i(x, y, -1)] = recv_up_down_buff[y*nx+x];
                     }
                 }
             } else {
@@ -186,7 +184,8 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
-        // отправка (left, back, down)
+        MPI_Barrier(MPI_COMM_WORLD);
+        // отправка (left, front, down)
             // left
             if (xb > 0){
                 for (int z = 0; z < nz; ++z){
@@ -196,11 +195,11 @@ int main(int argc, char *argv[]) {
                 }
                 MPI_Send(send_left_right_buff, nz*ny, MPI_DOUBLE, _ib(xb-1, yb, zb), id, MPI_COMM_WORLD);
             }
-            // back
+            // front
             if (yb > 0){
                 for (int z = 0; z < nz; ++z){
                     for (int x = 0; x < nx; ++x){
-                        send_front_back_buff[z*nz+x] = data[_i(x, 0, z)];
+                        send_front_back_buff[z*nx+x] = data[_i(x, 0, z)];
                     }
                 }
                 MPI_Send(send_front_back_buff, nz*nx, MPI_DOUBLE, _ib(xb, yb-1, zb), id, MPI_COMM_WORLD);
@@ -209,12 +208,12 @@ int main(int argc, char *argv[]) {
             if (zb > 0){
                 for (int y = 0; y < ny; ++y){
                     for (int x = 0; x < nx; ++x){
-                        send_up_down_buff[y*ny+x] = data[_i(x, y, 0)];
+                        send_up_down_buff[y*nx+x] = data[_i(x, y, 0)];
                     }
                 }
                 MPI_Send(send_up_down_buff, ny*nx, MPI_DOUBLE, _ib(xb, yb, zb-1), id, MPI_COMM_WORLD);
             }
-        // прием (right, front, up)
+        // прием (right, back, up)
             // right
             if (xb < xnb-1){
                 MPI_Recv(recv_left_right_buff, nz*ny, MPI_DOUBLE, _ib(xb+1, yb, zb), _ib(xb+1, yb, zb), MPI_COMM_WORLD, &status);
@@ -230,18 +229,18 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
-            // front
+            // back
             if (yb < ynb-1){
                 MPI_Recv(recv_front_back_buff, nz*nx, MPI_DOUBLE, _ib(xb, yb+1, zb), _ib(xb, yb+1, zb), MPI_COMM_WORLD, &status);
                 for (int z = 0; z < nz; ++z){
                     for (int x = 0; x < nx; ++x){
-                        data[_i(x, ny, z)] = recv_front_back_buff[z*nz+x];
+                        data[_i(x, ny, z)] = recv_front_back_buff[z*nx+x];
                     }
                 }
             } else {
                 for (int z = 0; z < nz; ++z){
                     for (int x = 0; x < nx; ++x){
-                        data[_i(x, ny, z)] = bc_front;
+                        data[_i(x, ny, z)] = bc_back;
                     }
                 }
             }
@@ -250,7 +249,7 @@ int main(int argc, char *argv[]) {
                 MPI_Recv(recv_up_down_buff, ny*nx, MPI_DOUBLE, _ib(xb, yb, zb+1), _ib(xb, yb, zb+1), MPI_COMM_WORLD, &status);
                 for (int y = 0; y < ny; ++y){
                     for (int x = 0; x < nx; ++x){
-                        data[_i(x, y, nz)] = recv_up_down_buff[y*ny+x];
+                        data[_i(x, y, nz)] = recv_up_down_buff[y*nx+x];
                     }
                 }
             } else {
@@ -260,79 +259,39 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
+        MPI_Barrier(MPI_COMM_WORLD);
+
         // итерация
-        double eps = -std::numeric_limits<double>::infinity();
+        double eps = -10000000.0;
         for (int z = 0; z < nz; ++z){
             for (int y = 0; y < ny; ++y){
                 for (int x = 0; x < nx; ++x){
                     next_data[_i(x, y, z)] = ((data[_i(x+1, y, z)]+data[_i(x-1, y, z)])/(hx*hx) +
                                               (data[_i(x, y+1, z)]+data[_i(x, y-1, z)])/(hy*hy) + 
                                               (data[_i(x, y, z+1)]+data[_i(x, y, z-1)])/(hz*hz)) /
-                                              (2.0*(1/(hx*hx)+1/(hy*hy)+1/(hz*hz)));
+                                              (2.0*((1/(hx*hx))+(1/(hy*hy))+(1/(hz*hz))));
                     eps = std::max(eps, std::abs(next_data[_i(x, y, z)]-data[_i(x, y, z)]));                                       
                 }
             }
         }
 
+        MPI_Barrier(MPI_COMM_WORLD);
         MPI_Allgather(&eps, 1, MPI_DOUBLE, eps_buff, 1, MPI_DOUBLE, MPI_COMM_WORLD);
-        max_eps = -std::numeric_limits<double>::infinity();
+
+        max_eps = -10000000.0;
         for (int i = 0; i < znb*ynb*xnb; ++i){
             max_eps = std::max(max_eps, eps_buff[i]);
         }
-        // std::cout << max_eps << '\n';
-        // if (id == 0){
-        //     for (int z = 0; z < znb; ++z){
-        //         for (int y = 0; y < ynb; ++y){
-        //             for (int x = 0; x < xnb; ++x){
-        //                 std::cout << eps_buff[_ib(x, y, z)] << ' ';
-        //             }
-        //             std::cout << '\n';
-        //         }
-        //         std::cout << "+++\n\n\n";
-        //     }
-        // }
-
-        // if (id == 1){
-        //     std::cout << hx << ' ' << hy << ' ' << hz << '\n';
-        //     for (int z = -1; z <= nz; ++z){
-        //         for (int y = -1; y <= ny; ++y){
-        //             for (int x = -1; x <= nx; ++x){
-        //                 std::cout << data[_i(x, y, z)] << ' ';
-        //             }
-        //             std::cout << '\n';
-        //         }
-        //         std::cout << "===\n";
-        //     }
-        //     std::cout << "__________________________\n";
-        //     for (int z = -1; z <= nz; ++z){
-        //         for (int y = -1; y <= ny; ++y){
-        //             for (int x = -1; x <= nx; ++x){
-        //                 std::cout << next_data[_i(x, y, z)] << ' ';
-        //             }
-        //             std::cout << '\n';
-        //         }
-        //         std::cout << "===\n";
-        //     }
-        //     std::cout << "\n\n\n";
-        // }
             
-
         // обмен указателями
         double* tmp = data;
         data = next_data;
         next_data = tmp;
     }
 
-    if (id == 0){
-        for (int i = 0; i < znb*ynb*xnb; ++i){
-            std::cout << eps_buff[i] << ", ";
-        }
-    }
-    std::cout << "=\n";
-
     MPI_Barrier(MPI_COMM_WORLD);
-    double* buff = (double*)malloc(nx*sizeof(double));
     // сборка результата
+    double* buff = (double*)malloc(nx*sizeof(double));
     if (id != 0){
         for (int z = 0; z < nz; ++z){
             for (int y = 0; y < ny; ++y){
@@ -344,37 +303,37 @@ int main(int argc, char *argv[]) {
         }
     }
     else {
-        std::cout << nx << '\n';
-        std::cout << xnb << ' ' << ynb << ' ' << znb << '\n';
+        FILE* fptr = fopen(save_path.c_str(), "w");
         for (int z_b = 0; z_b < znb; ++z_b){
             for (int z = 0; z < nz; ++z){
-                for (int y_b = ynb-1; y_b >= 0; --y_b){
-                    for (int y = ny-1; y >= 0; --y){
+                for (int y_b = 0; y_b < ynb; ++y_b){
+                    for (int y = 0; y < ny; ++y){
                         for (int x_b = 0; x_b < xnb; ++x_b){
-                            if (z_b+y_b+z_b == 0){
+                            if (_ib(x_b, y_b, z_b) == 0){
                                 for (int x = 0; x < nx; ++x){
                                     buff[x] = data[_i(x, y, z)];
                                 }
                             }
                             else {
-                                // std::cout << _ib(x_b, y_b, z_b) << '\n';
                                 MPI_Recv(buff, nx, MPI_DOUBLE, _ib(x_b, y_b, z_b), _ib(x_b, y_b, z_b), MPI_COMM_WORLD, &status);
                             }
 
                             for (int x = 0; x < nx; ++x){
-                                std::cout << buff[x] << ' ';
+                                fprintf(fptr, "%.6e ", buff[x]);
                             }
                         }
-
-                        std::cout << '\n';
+                        fprintf(fptr, "\n");
                     }
                 }
-                std::cout << "=== \n";
+                fprintf(fptr, "\n");
             }
         }
+        fclose(fptr);
     }
 
     MPI_Finalize();
+
+    free(buff);
 
     free(send_up_down_buff);
     free(send_left_right_buff);
@@ -383,8 +342,6 @@ int main(int argc, char *argv[]) {
     free(recv_up_down_buff);
     free(recv_left_right_buff);
     free(recv_front_back_buff);
-
-    free(buff);
 
     free(data);
     free(next_data);

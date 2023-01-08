@@ -328,7 +328,7 @@ void particles_step(){
 	CSC(cudaEventCreate(&stop));
 	CSC(cudaEventRecord(start));
 
-	particle_kernel<<<512, 32>>> (dev_particles, num_particles, cam_particle, projectile, K, W, g, offset, dt, e);
+	particle_kernel<<<16, 32>>> (dev_particles, num_particles, cam_particle, projectile, K, W, g, offset, dt, e);
 
 	CSC(cudaEventRecord(stop));
 	CSC(cudaEventSynchronize(stop));

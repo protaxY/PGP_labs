@@ -1,0 +1,1 @@
+i=0; while [[ $i != 126 ]]; do ./conv.py $i.data $i.png; i=$(($i+1)); done;

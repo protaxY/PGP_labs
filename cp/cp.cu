@@ -1942,8 +1942,12 @@ int main(int argc, char **argv) {
             pref_save_path = "res/";
             suff_save_path = ".data";
 
-            w = 200;
-            h = 300;
+            // w = 200;
+            // h = 300;
+            
+            w = 600;
+            h = 600;
+
             fow = 30.0;
 
             r_0_c = 7.0; z_0_c = 3.0; f_0_c = 0.0;
